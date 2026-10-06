@@ -1,0 +1,128 @@
+<div class="page">
+
+  <header class="header">
+    <h1>{{ title }}</h1>
+    <p>Angular + Python Flask + CSV</p>
+  </header>
+
+  <section class="card">
+
+    <h2>Add Student</h2>
+
+    <div class="form-grid">
+
+      <input
+        type="text"
+        placeholder="Student name"
+        [(ngModel)]="name"
+      />
+
+      <input
+        type="number"
+        placeholder="Age"
+        [(ngModel)]="age"
+      />
+
+      <select [(ngModel)]="grade">
+        <option value="A">Grade A</option>
+        <option value="B">Grade B</option>
+        <option value="C">Grade C</option>
+        <option value="D">Grade D</option>
+        <option value="F">Grade F</option>
+      </select>
+
+      <button (click)="addStudent()">
+        Add Student
+      </button>
+
+    </div>
+
+  </section>
+
+  <section class="card">
+
+    <div class="section-header">
+      <h2>Student Records</h2>
+
+      <button (click)="loadStudents()">
+        Refresh
+      </button>
+    </div>
+
+    <table *ngIf="students.length > 0">
+      <thead>
+        <tr>
+          <th>ID</th>
+          <th>Name</th>
+          <th>Age</th>
+          <th>Grade</th>
+          <th>Action</th>
+        </tr>
+      </thead>
+
+      <tbody>
+        <tr *ngFor="let student of students">
+          <td>{{ student.id }}</td>
+          <td>{{ student.name }}</td>
+          <td>{{ student.age }}</td>
+          <td>{{ student.grade }}</td>
+
+          <td>
+            <button
+              class="danger"
+              (click)="deleteStudent(student.id)"
+            >
+              Delete
+            </button>
+          </td>
+        </tr>
+      </tbody>
+    </table>
+
+    <p *ngIf="students.length === 0">
+      No student records available.
+    </p>
+
+  </section>
+
+  <section class="card">
+
+    <h2>Search Student</h2>
+
+    <div class="search-row">
+      <input
+        type="text"
+        placeholder="Student ID"
+        [(ngModel)]="searchId"
+      />
+
+      <button (click)="searchStudent()">
+        Search
+      </button>
+    </div>
+
+  </section>
+
+  <section class="card">
+
+    <div class="section-header">
+      <h2>Class Summary</h2>
+
+      <button (click)="loadSummary()">
+        View Summary
+      </button>
+    </div>
+
+    <div *ngIf="summary" class="summary">
+      Students: {{ summary.count }}
+      <br />
+      Average age: {{ summary.average_age }}
+    </div>
+
+  </section>
+
+  <div class="status">
+    <strong>Status:</strong> {{ message }}
+  </div>
+
+</div>

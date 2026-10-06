@@ -1,0 +1,94 @@
+.page {
+  max-width: 1000px;
+  margin: 40px auto;
+  padding: 20px;
+  font-family: Arial, sans-serif;
+}
+
+.header {
+  margin-bottom: 25px;
+}
+
+.header h1 {
+  margin-bottom: 5px;
+}
+
+.header p {
+  color: #666;
+}
+
+.card {
+  border: 1px solid #ddd;
+  border-radius: 10px;
+  padding: 22px;
+  margin-bottom: 20px;
+  background: white;
+}
+
+.form-grid {
+  display: grid;
+  grid-template-columns: 2fr 1fr 1fr auto;
+  gap: 10px;
+}
+
+.search-row {
+  display: flex;
+  gap: 10px;
+}
+
+input,
+select {
+  padding: 11px;
+  border: 1px solid #bbb;
+  border-radius: 6px;
+  font-size: 14px;
+}
+
+button {
+  padding: 11px 18px;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  background: #1976d2;
+  color: white;
+}
+
+button:hover {
+  opacity: 0.9;
+}
+
+button.danger {
+  background: #c62828;
+}
+
+.section-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: 15px;
+}
+
+th,
+td {
+  border-bottom: 1px solid #ddd;
+  padding: 12px;
+  text-align: left;
+}
+
+.summary {
+  margin-top: 15px;
+  padding: 15px;
+  background: #f3f7fb;
+  border-radius: 6px;
+}
+
+.status {
+  padding: 15px;
+  border-radius: 8px;
+  background: #f3f3f3;
+}
