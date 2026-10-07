@@ -111,17 +111,8 @@ export class App {
       const response = await fetch(`/api/students/${this.searchId}`);
       const data = await response.json();
 
-      /*
-       * Intentional frontend defect for RCA demonstration.
-       *
-       * When the backend says the student does not exist,
-       * the code incorrectly assumes "student" exists.
-       */
       if (!response.ok) {
-        const student = data.student;
-        const studentName = student.name;
-
-        this.message = `Student: ${studentName}`;
+        this.message = data.error || 'Student not found';
         return;
       }
 
