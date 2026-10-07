@@ -229,21 +229,30 @@ def frontend_error():
         "message",
         "Unknown frontend error"
     )
-
     stack = data.get(
         "stack",
         "No frontend stack trace"
     )
+    context = data.get(
+        "context",
+        data.get("endpoint", "No frontend context")
+    )
+    occurred_at = data.get(
+        "occurredAt",
+        data.get("timestamp", "Unknown timestamp")
+    )
 
     logging.error(
-        "FRONTEND_ERROR: %s | STACK: %s",
+        "FRONTEND_ERROR: %s | CONTEXT: %s | OCCURRED_AT: %s | STACK: %s",
         message,
+        context,
+        occurred_at,
         stack
     )
 
     return jsonify({
         "status": "frontend error logged"
-    }), 500
+    }), 202
 
 
 if __name__ == "__main__":

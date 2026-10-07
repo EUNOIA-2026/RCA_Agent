@@ -30,6 +30,10 @@ export class App {
   message = 'Ready';
   summary: { count: number; average_age: number } | null = null;
 
+  ngOnInit() {
+    void this.loadStudents();
+  }
+
   async loadStudents() {
     try {
       const response = await fetch('/api/students');
@@ -125,8 +129,12 @@ export class App {
         `Student found: ${data.name} (Grade ${data.grade})`;
 
     } catch (error: any) {
-      await this.reportFrontendError(error);
-      this.message = 'A frontend error occurred';
+      await this.reportFrontendError(
+        error,
+        'searchStudent',
+        `/api/students/${this.searchId}`
+      );
+      this.message = 'Unable to complete the operation.';
       console.error(error);
     }
   }
@@ -143,7 +151,11 @@ export class App {
     }
   }
 
-  private async reportFrontendError(error: any) {
+  private async reportFrontendError(
+    error: any,
+    context: string,
+    endpoint: string
+  ) {
     await fetch('/api/error/frontend', {
       method: 'POST',
       headers: {
@@ -151,7 +163,10 @@ export class App {
       },
       body: JSON.stringify({
         message: error?.message || String(error),
-        stack: error?.stack || 'No stack trace'
+        stack: error?.stack || 'No stack trace',
+        context,
+        endpoint,
+        timestamp: new Date().toISOString()
       })
     }).catch(() => {
       // Avoid hiding the original frontend failure.
