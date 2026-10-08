@@ -12,6 +12,11 @@ from typing import Any
 import requests
 from dotenv import load_dotenv
 
+if __package__:
+    from .documentation_healer import DocumentationHealer
+else:
+    from documentation_healer import DocumentationHealer
+
 
 # ---------------------------------------------------------------------------
 # Paths / configuration
@@ -1190,28 +1195,14 @@ def initialize_watch_state(process_existing: bool) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Autonomous RCA follow-up code repair agent"
+        description="RCA repair and documentation self-healing agent"
     )
-
-    parser.add_argument(
-        "--once",
-        action="store_true",
-        help="Process one report and exit.",
-    )
-
-    parser.add_argument(
-        "--report",
-        type=str,
-        default=None,
-        help="Explicit RCA report path.",
-    )
-
-    parser.add_argument(
-        "--process-existing",
-        action="store_true",
-        help="Process existing RCA reports when watch mode starts.",
-    )
-
+    parser.add_argument("--once", action="store_true", help="Process one RCA report and exit.")
+    parser.add_argument("--report", type=str, default=None, help="Explicit RCA report path.")
+    parser.add_argument("--process-existing", action="store_true", help="Process existing RCA reports when watch mode starts.")
+    parser.add_argument("--docs-once", action="store_true", help="Document current uncommitted source/config changes, then exit.")
+    parser.add_argument("--process-existing-docs", action="store_true", help="Analyze current repository source on startup.")
+    parser.add_argument("--no-docs", action="store_true", help="Disable documentation watching.")
     args = parser.parse_args()
 
     log(f"Fix Agent: {AGENT_NAME}")
@@ -1221,55 +1212,57 @@ def main() -> None:
 
     if args.report:
         report = Path(args.report).resolve()
-
         if not report.exists():
-            raise RuntimeError(
-                f"Specified RCA report does not exist: {report}"
-            )
-
+            raise RuntimeError(f"Specified RCA report does not exist: {report}")
+        process_report(report)
+        return
+    if args.once:
+        report = find_latest_report()
+        if not report:
+            raise RuntimeError(f"No RCA reports found under {AGENT_REPORT_ROOT}")
         process_report(report)
         return
 
-    if args.once:
-        report = find_latest_report()
-
-        if not report:
-            raise RuntimeError(
-                f"No RCA reports found under {AGENT_REPORT_ROOT}"
-            )
-
-        process_report(report)
+    healer = DocumentationHealer(ROOT, FIX_ROOT, call_fix_agent, log)
+    if args.docs_once:
+        healer.sync_working_tree_once()
         return
 
     initialize_watch_state(args.process_existing)
-
-    log(
-        f"Watching RCA reports every {POLL_SECONDS:.1f}s..."
-    )
+    if not args.no_docs:
+        healer.initialize_watch(args.process_existing_docs)
+        healer.log_configuration()
+    log(f"Watching RCA reports every {POLL_SECONDS:.1f}s...")
 
     while True:
         try:
             reports = find_new_reports()
-
             for report in reports:
                 try:
                     process_report(report)
                 except Exception as exc:
-                    log(
-                        f"Fix Agent error for {report.name}: "
-                        f"{exc!r}"
-                    )
+                    log(f"Fix Agent error for {report.name}: {exc!r}")
                     mark_processed(report)
 
+            if not args.no_docs:
+                try:
+                    healer.poll_local_changes()
+                except Exception as exc:
+                    log(f"Local documentation sync failed and will retry: {exc!r}")
+                try:
+                    healer.poll_merged_pull_requests()
+                except Exception as exc:
+                    log(f"Merged-PR documentation sync failed and will retry: {exc!r}")
         except KeyboardInterrupt:
             log("Fix Agent stopped.")
             return
-
         except Exception as exc:
             log(f"Watcher error: {exc!r}")
-
-        time.sleep(POLL_SECONDS)
-
+        try:
+            time.sleep(POLL_SECONDS)
+        except KeyboardInterrupt:
+            log("Fix Agent stopped.")
+            return
 
 if __name__ == "__main__":
     main()
