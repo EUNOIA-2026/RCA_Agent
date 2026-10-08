@@ -40,7 +40,7 @@ class DocumentationHealer:
         self.invoke_agent = invoke_agent
         self.log = logger
         self.state_file = self.fix_root / "state.json"
-        self.audit_root = self.fix_root / "reports" / "documentation"
+        self.report_root = self.fix_root / "reports"
         self.version_root = self.fix_root / "documentation_versions"
         self.pr_poll_interval = float(os.getenv("FIX_AGENT_PR_POLL_INTERVAL", "60"))
         self.next_pr_poll_at = 0.0
@@ -67,9 +67,18 @@ class DocumentationHealer:
     def _walk(self):
         for directory, names, files in os.walk(self.root):
             current = Path(directory)
+            if self.fix_root != self.root and (
+                current == self.fix_root or self.fix_root in current.parents
+            ):
+                names[:] = []
+                continue
             relative = current.relative_to(self.root)
             if relative == Path("."):
-                names[:] = [name for name in names if name.lower() not in IGNORED_DIRS and name.lower() != "fix_agent"]
+                names[:] = [
+                    name for name in names
+                    if name.lower() not in IGNORED_DIRS
+                    and (current / name).resolve() != self.fix_root
+                ]
             else:
                 names[:] = [name for name in names if name.lower() not in IGNORED_DIRS]
             yield current, files
@@ -377,6 +386,7 @@ Return ONLY JSON:
  "risk_level":"low|medium|high|critical|unknown",
  "impact_summary":"...", "impacted_modules":["..."],
  "change_categories":["api|database|configuration|business_logic|other"],
+ "report_type":"functional|technical",
  "changes":[{{"path":"repo/doc.md","old_text":"exact unique excerpt","new_text":"replacement preserving surrounding sections","why":"..."}}],
  "change_summary":"...",
  "traceability":[{{"source_path":"repo/code.py","change_summary":"...","documentation_status":"documented|not_applicable|undocumented","document_refs":["repo/doc.md"],"reason":"..."}}],
@@ -385,7 +395,7 @@ Return ONLY JSON:
  "validation":{{"all_code_changes_documented":true,"jira_requirements_covered":true}},
  "verification_notes":"..."
 }}
-For update, changes must be non-empty. For other decisions, changes must be []. Account for every changed source path. A not_applicable status needs a specific reason. If no Jira ticket was retrieved, requirements may be empty and state that coverage is unavailable.
+Classify the overall change as functional when it changes user-visible behavior, business rules, or application/API behavior. Classify infrastructure, deployment, build, and configuration-only changes as technical. For mixed changes, use functional if user-visible or business behavior changes. For update, changes must be non-empty. For other decisions, changes must be []. Account for every changed source path. A not_applicable status needs a specific reason. If no Jira ticket was retrieved, requirements may be empty and state that coverage is unavailable.
 """.strip()
     @staticmethod
     def parse_plan(raw: str) -> dict[str, Any]:
@@ -406,6 +416,8 @@ For update, changes must be non-empty. For other decisions, changes must be []. 
                 raise RuntimeError(f"Documentation field {key} must be a list.")
         if plan.get("risk_level", "unknown") not in {"low", "medium", "high", "critical", "unknown"}:
             raise RuntimeError("Documentation response has an invalid risk level.")
+        if plan.get("report_type") not in {"functional", "technical"}:
+            raise RuntimeError("Documentation response has an invalid report type.")
         return plan
 
     def validate_plan(self, plan: dict[str, Any], source: list[dict[str, str]],
@@ -770,26 +782,67 @@ For update, changes must be non-empty. For other decisions, changes must be []. 
         self.log(f"Documentation pull request created: {pull_request['html_url']} ({status}).")
         return {"url": str(pull_request["html_url"]), "branch": branch, "status": status}
 
-    def write_reports(self, event: dict[str, Any], source: list[dict[str, str]],
-                      plan: dict[str, Any] | None, issues: list[str],
-                      applied: list[dict[str, str]], version_dir: Path | None,
-                      error: str | None = None) -> tuple[Path, Path]:
-        self.audit_root.mkdir(parents=True, exist_ok=True)
-        stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S-%f")
-        audit = self.audit_root / f"audit-{stamp}.md"
-        trace = self.audit_root / f"traceability-{stamp}.md"
+    @staticmethod
+    def _report_type(
+        plan: dict[str, Any] | None,
+        source: list[dict[str, str]],
+    ) -> str:
+        if plan and plan.get("report_type") in {"functional", "technical"}:
+            return str(plan["report_type"])
+        if plan:
+            categories = {
+                str(category).lower()
+                for category in plan.get("change_categories", [])
+            }
+            if categories & {"api", "database", "business_logic"}:
+                return "functional"
+            if categories == {"configuration"}:
+                return "technical"
+        technical_names = {
+            "dockerfile", "makefile", "pyproject.toml", "requirements.txt",
+            "tsconfig.json", "angular.json",
+        }
+        technical_suffixes = {
+            ".ini", ".cfg", ".conf", ".toml", ".yaml", ".yml", ".tf",
+            ".gradle", ".properties",
+        }
+        paths = [Path(item.get("path", "")).name.lower() for item in source]
+        if paths and all(
+            name in technical_names or Path(name).suffix.lower() in technical_suffixes
+            for name in paths
+        ):
+            return "technical"
+        return "functional"
+
+    def write_report(self, event: dict[str, Any], source: list[dict[str, str]],
+                     plan: dict[str, Any] | None, issues: list[str],
+                     applied: list[dict[str, str]], version_dir: Path | None,
+                     error: str | None = None) -> Path:
+        report_type = self._report_type(plan, source)
+        report_dir = self.report_root / (
+            "functional_changes" if report_type == "functional" else "technical"
+        )
+        report_dir.mkdir(parents=True, exist_ok=True)
+        report = report_dir / "latest.md"
         lines = [
-            "# Documentation Self-Healing Audit", "",
+            f"# {'Functional' if report_type == 'functional' else 'Technical'} Change Report",
+            "",
             f"- Generated: {datetime.now(timezone.utc).isoformat()}",
+            f"- Report type: {report_type}",
             f"- Trigger: {event.get('kind', 'unknown')}",
             f"- Source reference: {event.get('source_ref', 'local working tree')}",
             f"- Pull request: {event.get('url', 'not applicable')}",
             f"- Jira tickets: {', '.join(event.get('jira_keys', [])) or 'not linked/detected'}",
             f"- Decision: {(plan or {}).get('decision', 'analysis_failed')}",
             f"- Risk: {(plan or {}).get('risk_level', 'unknown')}",
-            f"- Validation: {'passed' if not issues and not error else 'failed'}", "",
-            "## Document change summary", "", str((plan or {}).get("change_summary", "Not available.")),
-            "", "## Changed source files", "",
+            f"- Validation: {'passed' if not issues and not error else 'failed'}",
+            "",
+            "## Documentation change summary",
+            "",
+            str((plan or {}).get("change_summary", "Not available.")),
+            "",
+            "## Changed source files",
+            "",
         ]
         lines.extend(f"- **{item['status']}** `{item['path']}`" for item in source)
         all_files = event.get("all_changed_files", [])
@@ -821,15 +874,12 @@ For update, changes must be non-empty. For other decisions, changes must be []. 
                 f"- Branch: `{documentation_pr.get('branch', 'not available')}`",
                 f"- Merge status: {documentation_pr.get('status', 'unknown')}",
             ])
-        audit.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
-        lines = [
-            "# Documentation Traceability Report", "",
-            f"- Generated: {datetime.now(timezone.utc).isoformat()}",
-            f"- Source reference: {event.get('source_ref', 'local working tree')}",
-            f"- Jira tickets: {', '.join(event.get('jira_keys', [])) or 'none'}", "",
-            "## Code-to-document mapping", "",
-        ]
+        lines.extend([
+            "",
+            "## Code-to-document mapping",
+            "",
+        ])
         entries = (plan or {}).get("traceability", [])
         if entries:
             lines.extend(["| Source path | Change | Status | Documents | Rationale |", "|---|---|---|---|---|"])
@@ -855,8 +905,8 @@ For update, changes must be non-empty. For other decisions, changes must be []. 
                 lines.append("| " + " | ".join(value.replace("|", "\\|").replace("\n", " ") for value in values) + " |")
         else:
             lines.append("No Jira requirement mapping was available.")
-        trace.write_text("\n".join(lines) + "\n", encoding="utf-8")
-        return audit, trace
+        report.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        return report
 
     @staticmethod
     def _bounded_source_records(records: list[dict[str, str]]) -> list[dict[str, str]]:
@@ -924,13 +974,11 @@ For update, changes must be non-empty. For other decisions, changes must be []. 
             else:
                 self.log(f"Documentation decision: {plan['decision']}.")
         except Exception as exc:
-            audit, trace = self.write_reports(event, source, plan, issues, applied, version_dir, str(exc))
-            self.log(f"Documentation audit: {audit}")
-            self.log(f"Traceability report: {trace}")
+            report = self.write_report(event, source, plan, issues, applied, version_dir, str(exc))
+            self.log(f"Change report: {report}")
             raise
-        audit, trace = self.write_reports(event, source, plan, issues, applied, version_dir)
-        self.log(f"Documentation audit: {audit}")
-        self.log(f"Traceability report: {trace}")
+        report = self.write_report(event, source, plan, issues, applied, version_dir)
+        self.log(f"Change report: {report}")
 
     def initialize_watch(self, process_existing: bool = False) -> None:
         state = self._state()

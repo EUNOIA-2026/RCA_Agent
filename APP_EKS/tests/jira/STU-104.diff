@@ -1,0 +1,6 @@
+diff --git a/backend/app.py b/backend/app.py
+--- a/backend/app.py
++++ b/backend/app.py
+@@ -91 +91 @@
+-                "error": "Grade must be A, B, C, D or F"
++                "error": "Grade must be A, A+, C, D or F"

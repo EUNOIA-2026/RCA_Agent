@@ -2,10 +2,13 @@ import argparse
 import json
 import os
 from pathlib import Path
+import time
 from urllib.parse import quote
 
 import requests
 from dotenv import load_dotenv
+
+from documentation_healer import DocumentationHealer
 
 
 FIX_AGENT_DIR = Path(__file__).resolve().parent
@@ -96,9 +99,59 @@ def call_agent(prompt: str) -> str:
     return result
 
 
+def watch_for_changes() -> None:
+    agent_name = get_agent_name()
+    required_env("AZURE_AI_PROJECT_ENDPOINT")
+    required_env("API_KEY")
+
+    try:
+        interval = float(os.getenv("FIX_AGENT_WATCH_INTERVAL", "5"))
+    except ValueError as exc:
+        raise RuntimeError("FIX_AGENT_WATCH_INTERVAL must be a positive number of seconds.") from exc
+    if interval <= 0:
+        raise RuntimeError("FIX_AGENT_WATCH_INTERVAL must be a positive number of seconds.")
+
+    healer = DocumentationHealer(
+        root=FIX_AGENT_DIR.parent,
+        fix_root=FIX_AGENT_DIR,
+        invoke_agent=call_agent,
+        logger=lambda message: print(f"[Self-Healing] {message}", flush=True),
+    )
+    print(f"Agent: {agent_name}", flush=True)
+    healer.log_configuration()
+    healer.initialize_watch()
+    print(
+        f"Watching {healer.root} for source changes every {interval:g} seconds. "
+        "Press Ctrl+C to stop.",
+        flush=True,
+    )
+
+    retry_delay = max(interval, 60.0)
+    while True:
+        try:
+            healer.poll_local_changes()
+            healer.poll_merged_pull_requests()
+            retry_delay = max(interval, 60.0)
+        except (requests.RequestException, RuntimeError) as exc:
+            print(
+                f"[Self-Healing] Watch iteration failed: {exc}. "
+                f"Retrying in {retry_delay:g} seconds.",
+                flush=True,
+            )
+            time.sleep(retry_delay)
+            retry_delay = min(retry_delay * 2, 300.0)
+            continue
+        time.sleep(interval)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Ask the configured Azure AI agent what it would do."
+        description="Run the Azure AI agent or watch project changes for documentation updates."
+    )
+    parser.add_argument(
+        "--watch",
+        action="store_true",
+        help="Watch project source changes and update the relevant existing documentation.",
     )
     parser.add_argument(
         "task",
@@ -106,6 +159,10 @@ def main() -> None:
         help="Optional task for the agent to explain a plan for.",
     )
     args = parser.parse_args()
+
+    if args.watch:
+        watch_for_changes()
+        return
 
     task = args.task or "Describe your role and what you will do."
     prompt = (
@@ -121,5 +178,7 @@ def main() -> None:
 if __name__ == "__main__":
     try:
         main()
+    except KeyboardInterrupt:
+        print("\nSelf-Healing watcher stopped.", flush=True)
     except (requests.RequestException, RuntimeError) as exc:
         raise SystemExit(f"Fix Agent error: {exc}") from exc
