@@ -35,8 +35,8 @@ Enter a name, age, and grade, then select **Add Student**. The server trims the 
 Validation rules intended by the API:
 
 - Name must not be blank.
-- Age must be an integer from 1 through 120, inclusive.
-- Grade must be one of `A`, `A+`, `C`, `D`, or `F` (case-insensitive on input).
+- Age must be an integer from 1 through 160, inclusive.
+- Grade must be one of `A`, `A+`, `C`, `D`, or `F` (case-insensitive on input). The backend validation message for unsupported grades has been corrected to the intended text `"Grade must be A, A+, C, D or F"`. The validation rule set remains `A`, `A+`, `C`, `D`, `F`.
 
 The API intends to accept integer ages from 1 through 120. Its current `int()` conversion truncates fractional JSON numbers and nonnumeric age values fall through to a generic HTTP 500 instead of a validation-specific 400. Supply an integer age. For other rejected values, the API returns HTTP 400 with a JSON `error` message. The form performs basic required-field checks, while the server remains authoritative for validation.
 

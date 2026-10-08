@@ -83,7 +83,7 @@ All API paths are served by the root Flask app. JSON request/response examples b
 | `GET /api/summary` | Return record count and average age. | `200` `{ "count": 5, "average_age": 21.0 }`. | `500` for malformed data or an empty list (division by zero). |
 | `POST /api/error/frontend` | Write a frontend error report to application logs. | `202` `{ "status": "frontend error logged" }`. | No explicit request validation is implemented. |
 
-`POST /api/students` expects a JSON object with `name`, `age`, and `grade`. Age is passed through Python `int()`, then range-checked for 1–120. Fractional JSON numbers are truncated by this conversion; nonnumeric values raise an exception that the broad route handler returns as HTTP 500. Grade is trimmed, uppercased, and checked against `A/A+/C/D/F`. Responses for individual students preserve CSV values as strings.
+`POST /api/students` expects a JSON object with `name`, `age`, and `grade`. Age is passed through Python `int()`, then range-checked for 1–160. Fractional JSON numbers are truncated by this conversion; nonnumeric values raise an exception that the broad route handler returns as HTTP 500. Grade is trimmed, uppercased, and checked against `A/A+/C/D/F`. Responses for individual students preserve CSV values as strings.
 
 The frontend error endpoint accepts `message`, `stack`, `context`, and `occurredAt`; the root app also accepts the aliases `endpoint` and `timestamp` for context and time. These values are written to the server log.
 
