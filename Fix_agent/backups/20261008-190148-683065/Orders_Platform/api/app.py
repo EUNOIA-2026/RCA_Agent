@@ -92,11 +92,6 @@ def create_app(start_monitors: bool = False) -> Flask:
             return jsonify(cached)
 
         order = store.get_order(order_id)
-
-        # If the order was not found, return 404 rather than dereferencing None.
-        if order is None:
-            return jsonify({"error": "order not found"}), 404
-
         payload = {
             "id": order["id"],
             "customer": order["customer"],

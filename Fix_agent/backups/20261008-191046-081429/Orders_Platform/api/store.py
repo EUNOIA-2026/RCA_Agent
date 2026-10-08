@@ -144,6 +144,7 @@ class Store:
 
     def cache_set(self, order_id: int, payload: dict) -> None:
         self.redis_client().set(f"order:{order_id}", json.dumps(payload))
+        self.local_cache[f"order:{order_id}"] = payload
 
     def enqueue(self, order_id: int) -> None:
         self.redis_client().rpush(QUEUE_KEY, order_id)

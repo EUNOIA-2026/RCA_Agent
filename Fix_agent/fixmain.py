@@ -412,15 +412,37 @@ def strip_code_fences(text: str) -> str:
     return cleaned
 
 
+def extract_json_object(text: str) -> dict[str, Any] | None:
+    """First JSON object in the reply that looks like a fix plan, ignoring surrounding prose."""
+    decoder = json.JSONDecoder()
+    position = text.find("{")
+
+    while position != -1:
+        try:
+            candidate, _ = decoder.raw_decode(text[position:])
+        except json.JSONDecodeError:
+            candidate = None
+
+        if isinstance(candidate, dict) and "decision" in candidate:
+            return candidate
+
+        position = text.find("{", position + 1)
+
+    return None
+
+
 def parse_fix_plan(raw: str) -> dict[str, Any]:
     cleaned = strip_code_fences(raw)
 
     try:
         data = json.loads(cleaned)
     except json.JSONDecodeError as exc:
-        raise RuntimeError(
-            "Fix agent did not return valid JSON."
-        ) from exc
+        data = extract_json_object(raw)
+
+        if data is None:
+            raise RuntimeError(
+                "Fix agent did not return valid JSON."
+            ) from exc
 
     if not isinstance(data, dict):
         raise RuntimeError("Fix agent response must be a JSON object.")
@@ -1215,7 +1237,30 @@ def process_report(report_path: Path) -> None:
     )
 
     raw_plan = call_fix_agent(prompt)
-    plan = parse_fix_plan(raw_plan)
+
+    try:
+        plan = parse_fix_plan(raw_plan)
+    except RuntimeError:
+        log("Fix agent reply was not valid JSON; retrying once.")
+
+        raw_plan = call_fix_agent(
+            prompt
+            + "\n\nYour previous reply was not valid JSON. Reply with ONLY the "
+            "JSON object: no prose, no markdown."
+        )
+
+        try:
+            plan = parse_fix_plan(raw_plan)
+        except RuntimeError:
+            FIX_REPORT_ROOT.mkdir(parents=True, exist_ok=True)
+            dump = FIX_REPORT_ROOT / (
+                f"invalid-response-{datetime.now(timezone.utc):%Y%m%d-%H%M%S}.txt"
+            )
+            dump.write_text(raw_plan, encoding="utf-8")
+
+            raise RuntimeError(
+                f"Fix agent did not return valid JSON twice. Raw reply saved to {dump}"
+            ) from None
 
     log(
         f"Fix agent decision: {plan.get('decision')} "
