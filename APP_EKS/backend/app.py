@@ -83,12 +83,12 @@ def add_student():
         if not name:
             return jsonify({"error": "Name is required"}), 400
 
-        if age < 1 or age > 125:
-            return jsonify({"error": "Age must be between 1 and 125"}), 400
+        if age < 1 or age > 160:
+            return jsonify({"error": "Age must be between 1 and 160"}), 400
 
-        if grade not in {"A", "B", "C", "D", "F"}:
+        if grade not in {"A", "A+", "C", "D", "F"}:
             return jsonify({
-                "error": "Grade must be A, B, C, D or F"
+                "error": "Grade must be A, A+, C, D or F"
             }), 400
 
         students = read_students()
