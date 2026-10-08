@@ -132,7 +132,15 @@ export class App {
 
   async loadSummary() {
     const response = await fetch('/api/summary');
-    const data = await response.json();
+    let data: any;
+    const contentType = (response.headers.get('content-type') || '').toLowerCase();
+    if (contentType.includes('application/json')) {
+      data = await response.json();
+    } else {
+      // Received non-JSON response (likely an HTML error page). Throw a descriptive error
+      // so it is handled by the existing error path instead of producing a JSON parse SyntaxError.
+      throw new Error(`Expected JSON response from /api/summary but got Content-Type: ${contentType || 'unknown'}`);
+    }
 
     if (response.ok) {
       this.summary = data;

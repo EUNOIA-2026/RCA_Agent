@@ -14,6 +14,9 @@ logging.basicConfig(
 
 CSV_FILE = Path(__file__).parent / "backend" / "data" / "students.csv"
 
+# Demo business rule: maximum 6 students.
+MAX_STUDENTS = 6
+
 
 def read_students():
     try:
@@ -92,6 +95,14 @@ def add_student():
             }), 400
 
         students = read_students()
+
+        # INTENTIONAL DEMO DEFECT:
+        # The 7th student should be rejected gracefully, but this currently
+        # raises an exception and produces HTTP 500.
+        if len(students) >= MAX_STUDENTS:
+            raise RuntimeError(
+                f"Student capacity exceeded: maximum is {MAX_STUDENTS}"
+            )
 
         next_id = max(
             [int(student["id"]) for student in students],

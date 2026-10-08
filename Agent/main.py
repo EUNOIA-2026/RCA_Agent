@@ -26,7 +26,12 @@ AGENT_NAME = required("AGENT_NAME")
 API_KEY = required("API_KEY")
 API_VERSION = os.getenv("API_VERSION", "v1")
 
-REPORT_DIR = Path(os.getenv("REPORT_DIR", "reports")).resolve()
+REPORT_DIR = Path(os.getenv("REPORT_DIR", "reports"))
+if not REPORT_DIR.is_absolute():
+    REPORT_DIR = (Path(__file__).resolve().parent / REPORT_DIR).resolve()
+else:
+    REPORT_DIR = REPORT_DIR.resolve()
+#REPORT_DIR = Path(os.getenv("REPORT_DIR", "reports")).resolve()
 POLL_INTERVAL = float(os.getenv("FALLBACK_POLL_INTERVAL", "2"))
 PROCESS_EXISTING = os.getenv("PROCESS_EXISTING", "false").lower() == "true"
 
