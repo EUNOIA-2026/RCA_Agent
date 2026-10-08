@@ -28,6 +28,8 @@ The root-level `app.py` is the entry point used by the supplied Dockerfile. `bac
 | `backend/app.py` | Alternate/duplicate Flask entry point; uses `backend/data/students.csv` and `backend/frontend-dist`. |
 | `backend/requirements.txt` | Pinned Python dependencies: Flask 3.1.0 and flask-cors 5.0.0. |
 | `backend/data/students.csv` | CSV data store and sample student records. |
+| `backend/review.py` / `backend/review_api.py` | Acceptance-criteria extraction, keyword-based comparison, evidence collection, and shared review API blueprint. Unit tests that exercise the reviewer and the review API endpoints are present under `tests/test_review.py` and the bundled fixtures are under `tests/jira/`. The reviewer accepts either a unified diff (string) or a list of changed files (path + content) and returns provisional per-criterion statuses plus a generated documentation draft. |
+| `tests/jira/` | Sample Jira ticket and unified diff used for review demonstrations and tests. |
 | `frontend/src/app/app.ts` | Angular standalone component, state, and HTTP calls. |
 | `frontend/src/app/app.html` | Main UI template. |
 | `frontend/src/app/app.css` | Component styling. |
@@ -82,6 +84,10 @@ All API paths are served by the root Flask app. JSON request/response examples b
 | `DELETE /api/students/{student_id}` | Remove one record and rewrite the CSV. | `200` `{ "message": "Student deleted successfully" }`. | `404` if absent; `500` on failure. |
 | `GET /api/summary` | Return record count and average age. | `200` `{ "count": 5, "average_age": 21.0 }`. | `500` for malformed data or an empty list (division by zero). |
 | `POST /api/error/frontend` | Write a frontend error report to application logs. | `202` `{ "status": "frontend error logged" }`. | No explicit request validation is implemented. |
+| `GET /api/reviews/sample` | Load the bundled Jira ticket and sample diff. | `200` `{ "ticket": "...", "diff": "..." }`. | `500` if a sample fixture cannot be read. |
+| `POST /api/reviews` | Compare ticket acceptance criteria with a unified diff and/or changed files. | `200` review method, summary, criteria statuses, keyword coverage, and file/line evidence. | `400` for invalid or missing ticket/change input; `413` if the JSON request exceeds 2 MiB; `500` on unexpected reviewer failure. |
+
+The review endpoint accepts JSON with a `ticket` Markdown string, an optional `diff` string, and/or `changed_files` (up to 20 `{ "path": "...", "content": "..." }` objects). It extracts the user-story text for context and bullet or numbered items under an `Acceptance Criteria` heading for per-criterion status. Unified diff evidence references added lines using the new-file line numbers; changed-file evidence references one-based source line numbers. It returns `method: "keyword_coverage_heuristic"` and labels criteria as `met`, `partially_met`, or `missing` based on coverage of normalized non-stopword keywords. The response also includes a `documentation_draft` Markdown string summarizing each provisional status and evidence. This draft is not written to repository files and must be checked against implementation and tests before it is copied into maintained docs. The response includes a notice that the analysis is provisional: it does not perform semantic reasoning, execute tests, or confirm runtime behavior. Treat results as triage hints and verify them manually.
 
 `POST /api/students` expects a JSON object with `name`, `age`, and `grade`. Age is passed through Python `int()`, then range-checked for 1–120. Fractional JSON numbers are truncated by this conversion; nonnumeric values raise an exception that the broad route handler returns as HTTP 500. Grade is trimmed, uppercased, and checked against `A/A+/C/D/F`. Responses for individual students preserve CSV values as strings.
 
@@ -140,7 +146,7 @@ This repository does not currently define a Deployment, Service, ConfigMap, Secr
 - The static directory is hard-coded as `build/frontend` in root `app.py` and the Dockerfile; Angular's configured output is `frontend/dist/frontend/browser`, so copying/build integration is a separate step.
 - `backend/app.py` has a different static directory and is not the Docker entry point.
 - The Angular dev server has no API proxy.
+- Jira review results are keyword-based and provisional; the service has no Jira connection, LLM integration, test execution, or automatic documentation update.
 - CSV persistence has no concurrency safety and ID values may be reused after deletion of the maximum ID.
 - Empty class summaries return HTTP 500.
 - There are no Kubernetes manifests, production WSGI server, authentication, or documented automated backend tests in the repository.
-

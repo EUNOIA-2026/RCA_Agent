@@ -121,6 +121,93 @@
 
   </section>
 
+  <section class="card review-card">
+    <div class="section-header">
+      <h2>Jira Change Review</h2>
+      <button (click)="loadSampleReview()">Load sample ticket and diff</button>
+    </div>
+
+    <p>
+      Compare acceptance criteria with a unified diff or selected changed
+      source files. This local keyword heuristic is provisional and does not
+      verify behavior.
+    </p>
+
+    <label for="review-ticket">Jira ticket text</label>
+    <textarea
+      id="review-ticket"
+      rows="10"
+      placeholder="Paste the ticket including an Acceptance Criteria section"
+      [(ngModel)]="reviewTicket"
+    ></textarea>
+
+    <label for="review-diff">Unified diff</label>
+    <textarea
+      id="review-diff"
+      rows="10"
+      placeholder="Paste a unified diff, or select changed files below"
+      [(ngModel)]="implementationDiff"
+      (ngModelChange)="changedFiles = []"
+    ></textarea>
+
+    <label for="review-files">Or select changed files</label>
+    <input
+      id="review-files"
+      type="file"
+      multiple
+      (change)="onChangedFilesSelected($event)"
+    />
+    <ul *ngIf="changedFiles.length > 0">
+      <li *ngFor="let file of changedFiles">{{ file.path }}</li>
+    </ul>
+
+    <button
+      class="review-submit"
+      [disabled]="reviewInProgress"
+      (click)="reviewChanges()"
+    >
+      {{ reviewInProgress ? 'Reviewing...' : 'Review changes' }}
+    </button>
+
+    <div *ngIf="reviewResult as result" class="review-results">
+      <p class="review-notice">{{ result.notice }}</p>
+      <p *ngIf="result.user_story">
+        <strong>User story context:</strong> {{ result.user_story }}
+      </p>
+      <p>
+        Met: {{ result.summary.met }} |
+        Partially met: {{ result.summary.partially_met }} |
+        Missing: {{ result.summary.missing }}
+      </p>
+      <h3>Documentation update draft</h3>
+      <p>Review and verify this text before adding it to maintained documentation.</p>
+      <button (click)="copyDocumentationDraft()">Copy documentation draft</button>
+      <textarea
+        aria-label="Documentation update draft"
+        rows="14"
+        readonly
+        [value]="result.documentation_draft"
+      ></textarea>
+      <article
+        *ngFor="let item of result.criteria"
+        class="criterion"
+        [class.status-met]="item.status === 'met'"
+        [class.status-partial]="item.status === 'partially_met'"
+        [class.status-missing]="item.status === 'missing'"
+      >
+        <h3>{{ statusLabel(item.status) }} - {{ item.criterion }}</h3>
+        <p>{{ item.note }} Keyword coverage: {{ item.keyword_coverage * 100 }}%.</p>
+        <ul *ngIf="item.evidence.length > 0">
+          <li *ngFor="let evidence of item.evidence">
+            <code>{{ evidence.file }}:{{ evidence.line }}</code>
+            <pre>{{ evidence.text }}</pre>
+          </li>
+        </ul>
+        <p *ngIf="item.evidence.length === 0">No matching added-line evidence found.</p>
+      </article>
+    </div>
+  </section>
+
   <div class="status">
     <strong>Status:</strong> {{ message }}
   </div>

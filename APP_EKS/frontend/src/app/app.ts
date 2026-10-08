@@ -9,6 +9,29 @@ interface Student {
   grade: string;
 }
 
+interface ReviewEvidence {
+  file: string;
+  line: number;
+  text: string;
+}
+
+interface CriterionReview {
+  criterion: string;
+  status: 'met' | 'partially_met' | 'missing';
+  keyword_coverage: number;
+  evidence: ReviewEvidence[];
+  note: string;
+}
+
+interface ReviewResult {
+  method: string;
+  user_story: string | null;
+  notice: string;
+  summary: { met: number; partially_met: number; missing: number };
+  criteria: CriterionReview[];
+  documentation_draft: string;
+}
+
 @Component({
   selector: 'app-root',
   standalone: true,
@@ -29,6 +52,11 @@ export class App {
 
   message = 'Ready';
   summary: { count: number; average_age: number } | null = null;
+  reviewTicket = '';
+  implementationDiff = '';
+  changedFiles: { path: string; content: string }[] = [];
+  reviewResult: ReviewResult | null = null;
+  reviewInProgress = false;
 
   ngOnInit() {
     void this.loadStudents();
@@ -139,6 +167,95 @@ export class App {
       this.message = 'Class summary loaded';
     } else {
       this.message = data.error || 'Unable to generate summary';
+    }
+
+    async loadSampleReview() {
+      try {
+        const response = await fetch('/api/reviews/sample');
+        const data = await response.json();
+        if (!response.ok) {
+          throw new Error(data.error || 'Unable to load sample review');
+        }
+        this.reviewTicket = data.ticket;
+        this.implementationDiff = data.diff;
+        this.changedFiles = [];
+        this.reviewResult = null;
+        this.message = 'Sample Jira ticket and diff loaded';
+      } catch (error) {
+        console.error(error);
+        this.message = 'Unable to load the sample Jira review';
+      }
+    }
+
+    async onChangedFilesSelected(event: Event) {
+      const input = event.target as HTMLInputElement;
+      const files = Array.from(input.files ?? []);
+      try {
+        this.changedFiles = await Promise.all(files.map(async file => ({
+          path: file.webkitRelativePath || file.name,
+          content: await file.text()
+        })));
+        this.implementationDiff = '';
+        this.reviewResult = null;
+        this.message = `${this.changedFiles.length} changed file(s) ready`;
+      } catch (error) {
+        console.error(error);
+        this.changedFiles = [];
+        this.message = 'Unable to read the selected files';
+      }
+    }
+
+    async reviewChanges() {
+      if (this.reviewInProgress) {
+        return;
+      }
+      this.reviewInProgress = true;
+      this.reviewResult = null;
+      try {
+        const response = await fetch('/api/reviews', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            ticket: this.reviewTicket,
+            diff: this.implementationDiff,
+            changed_files: this.changedFiles
+          })
+        });
+        const data = await response.json();
+        if (!response.ok) {
+          throw new Error(data.error || 'Unable to review changes');
+        }
+        this.reviewResult = data;
+        this.message = 'Jira change review completed; findings are provisional';
+      } catch (error) {
+        console.error(error);
+        this.message = error instanceof Error
+          ? error.message
+          : 'Unable to review changes';
+      } finally {
+        this.reviewInProgress = false;
+      }
+    }
+
+    statusLabel(status: CriterionReview['status']) {
+      return status === 'partially_met'
+        ? 'Partially met'
+        : status.charAt(0).toUpperCase() + status.slice(1);
+    }
+
+    async copyDocumentationDraft() {
+      if (!this.reviewResult) {
+        return;
+      }
+      try {
+        await navigator.clipboard.writeText(
+          this.reviewResult.documentation_draft
+        );
+        this.message = 'Documentation draft copied';
+      } catch (error) {
+        console.error(error);
+        this.message = 'Unable to copy the documentation draft; select its text to copy';
+      }
     }
   }
 
