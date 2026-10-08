@@ -36,7 +36,7 @@ Validation rules intended by the API:
 
 - Name must not be blank.
 - Age must be an integer from 1 through 120, inclusive.
-- Grade must be one of `A`, `A+`, `C`, `D`, or `F` (case-insensitive on input).
+- Grade must be one of `A`, `A+`, `C`, `D`, or `F` (case-insensitive on input). NOTE: A recent change in backend/app.py introduced a typographical error in the user-facing validation message returned by POST /api/students when the grade is invalid. The server currently returns the malformed message `"Grade must be A, , C, D or F"` (missing `A+`). The intended message is `"Grade must be A, A+, C, D or F"`. This discrepancy is a user-facing text bug only; the validation rule set remains `A`, `A+`, `C`, `D`, `F`.
 
 The API intends to accept integer ages from 1 through 120. Its current `int()` conversion truncates fractional JSON numbers and nonnumeric age values fall through to a generic HTTP 500 instead of a validation-specific 400. Supply an integer age. For other rejected values, the API returns HTTP 400 with a JSON `error` message. The form performs basic required-field checks, while the server remains authoritative for validation.
 
