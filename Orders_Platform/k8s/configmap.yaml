@@ -1,0 +1,8 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: orders-config
+data:
+  REDIS_URL: "redis://redis:6379/0"
+  DB_POOL_SIZE: "5"
+  CHAOS_ENABLED: "true"

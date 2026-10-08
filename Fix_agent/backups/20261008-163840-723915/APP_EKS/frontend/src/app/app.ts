@@ -123,14 +123,8 @@ export class App {
         return;
       }
 
-      // Defensive: ensure the parsed JSON is an object with expected fields.
-      if (!data || typeof data !== 'object' || !('name' in data) || !('grade' in data)) {
-        // If backend returned an error-shaped payload or null, show not-found message.
-        this.message = (data && (data as any).error) || 'Student not found';
-        return;
-      }
-
-      this.message = `Student found: ${data.name} (Grade ${data.grade})`;
+      this.message =
+        `Student found: ${data.name} (Grade ${data.grade})`;
 
     } catch (error: any) {
       await this.reportFrontendError(

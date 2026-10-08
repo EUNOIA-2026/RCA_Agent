@@ -4,7 +4,7 @@ import csv
 import logging
 from pathlib import Path
 
-app = Flask(__name__, static_folder="frontend-dist", static_url_path="")
+app = Flask(__name__, static_folder="build/frontend", static_url_path="")
 CORS(app)
 
 logging.basicConfig(
@@ -12,7 +12,10 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(message)s"
 )
 
-CSV_FILE = Path(__file__).parent / "data" / "students.csv"
+CSV_FILE = Path(__file__).parent / "backend" / "data" / "students.csv"
+
+# Demo business rule: maximum 6 students.
+MAX_STUDENTS = 6
 
 
 def read_students():
@@ -92,6 +95,14 @@ def add_student():
             }), 400
 
         students = read_students()
+
+        # INTENTIONAL DEMO DEFECT:
+        # The 7th student should be rejected gracefully, but this currently
+        # raises an exception and produces HTTP 500.
+        if len(students) >= MAX_STUDENTS:
+            raise RuntimeError(
+                f"Student capacity exceeded: maximum is {MAX_STUDENTS}"
+            )
 
         next_id = max(
             [int(student["id"]) for student in students],
@@ -203,11 +214,9 @@ def summary():
 
         total_age = sum(int(student["age"]) for student in students)
 
-        # Guard against empty student list to avoid ZeroDivisionError.
-        if len(students) == 0:
-            average_age = 0.0
-        else:
-            average_age = total_age / len(students)
+        # Intentional application defect for RCA demonstration:
+        # if there are zero students, this causes ZeroDivisionError.
+        average_age = total_age / len(students)
 
         return jsonify({
             "count": len(students),
@@ -237,11 +246,11 @@ def frontend_error():
     )
     context = data.get(
         "context",
-        "No frontend context"
+        data.get("endpoint", "No frontend context")
     )
     occurred_at = data.get(
         "occurredAt",
-        "Unknown timestamp"
+        data.get("timestamp", "Unknown timestamp")
     )
 
     logging.error(
@@ -258,4 +267,7 @@ def frontend_error():
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000)
+    app.run(
+        host="0.0.0.0",
+        port=5000
+    )

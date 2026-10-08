@@ -1,0 +1,40 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: orders
+      POSTGRES_PASSWORD: orders
+      POSTGRES_DB: orders
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U orders"]
+      interval: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+
+  api:
+    build: ./api
+    ports:
+      - "5000:5000"
+    environment:
+      DATABASE_URL: postgresql://orders:orders@postgres:5432/orders
+      REDIS_URL: redis://redis:6379/0
+      DB_POOL_SIZE: "5"
+      CHAOS_ENABLED: "true"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+
+  worker:
+    build: ./worker
+    environment:
+      DATABASE_URL: postgresql://orders:orders@postgres:5432/orders
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started

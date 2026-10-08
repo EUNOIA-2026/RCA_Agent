@@ -112,25 +112,12 @@ export class App {
       const data = await response.json();
 
       if (!response.ok) {
-        this.message = data?.error || 'Student not found';
+        this.message = data.error || 'Student not found';
         return;
       }
 
-      // Defensive check: some responses may legitimately parse to null (or an unexpected shape).
-      // Avoid dereferencing data when it's null/undefined to prevent runtime TypeError.
-      if (data == null) {
-        this.message = 'Student not found';
-        return;
-      }
-
-      // Defensive: ensure the parsed JSON is an object with expected fields.
-      if (!data || typeof data !== 'object' || !('name' in data) || !('grade' in data)) {
-        // If backend returned an error-shaped payload or null, show not-found message.
-        this.message = (data && (data as any).error) || 'Student not found';
-        return;
-      }
-
-      this.message = `Student found: ${data.name} (Grade ${data.grade})`;
+      this.message =
+        `Student found: ${data.name} (Grade ${data.grade})`;
 
     } catch (error: any) {
       await this.reportFrontendError(

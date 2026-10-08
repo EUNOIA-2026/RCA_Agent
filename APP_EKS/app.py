@@ -214,9 +214,11 @@ def summary():
 
         total_age = sum(int(student["age"]) for student in students)
 
-        # Intentional application defect for RCA demonstration:
-        # if there are zero students, this causes ZeroDivisionError.
-        average_age = total_age / len(students)
+        # Handle empty class to avoid ZeroDivisionError when there are no students.
+        if len(students) == 0:
+            average_age = 0.0
+        else:
+            average_age = total_age / len(students)
 
         return jsonify({
             "count": len(students),

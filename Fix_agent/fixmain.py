@@ -1,9 +1,11 @@
 import argparse
+import glob
 import json
 import os
 import re
 import shutil
 import subprocess
+import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -18,7 +20,7 @@ from dotenv import load_dotenv
 # ---------------------------------------------------------------------------
 
 ROOT = Path(__file__).resolve().parent.parent
-APP_ROOT = ROOT / "APP_EKS"
+APP_ROOT = ROOT / os.getenv("FIX_APP_DIR", "Orders_Platform")
 AGENT_REPORT_ROOT = ROOT / "Agent" / "reports"
 FIX_ROOT = ROOT / "Fix_agent"
 FIX_REPORT_ROOT = FIX_ROOT / "reports"
@@ -74,7 +76,31 @@ TEXT_SUFFIXES = {
     ".txt",
     ".toml",
     ".ini",
+    ".sh",
 }
+
+TEXT_FILENAMES = {"dockerfile"}
+
+IGNORED_PARTS = {
+    "node_modules",
+    ".git",
+    ".venv",
+    "__pycache__",
+    "dist",
+    "coverage",
+    "build",
+}
+
+SKIPPED_FILES = {"package-lock.json"}
+
+
+def is_secret_file(path: Path) -> bool:
+    name = path.name.lower()
+    return name.startswith(".env") or name.startswith("secret")
+
+
+def is_test_file(path: Path) -> bool:
+    return "tests" in (part.lower() for part in path.parts)
 
 
 # ---------------------------------------------------------------------------
@@ -156,98 +182,40 @@ def mark_processed(report: Path) -> None:
 # ---------------------------------------------------------------------------
 
 def infer_category(report_text: str, report_path: Path) -> str:
-    lower = report_text.lower()
+    match = re.search(
+        r"\*\*Application layer:\*\*\s*(\w+)",
+        report_text,
+    )
 
-    if "application layer:** frontend" in lower:
-        return "frontend"
+    if match:
+        return match.group(1).lower()
 
-    if "application layer:** backend" in lower:
-        return "backend"
+    # Reports are written to reports/<category>/.
+    return report_path.parent.name.lower() or "unknown"
 
-    if "application layer:** database" in lower:
-        return "database"
-
-    path_lower = str(report_path).lower()
-
-    if "\\frontend\\" in path_lower:
-        return "frontend"
-
-    if "\\backend\\" in path_lower:
-        return "backend"
-
-    if "\\database\\" in path_lower:
-        return "database"
-
-    return "unknown"
-
-
-
-def source_roots_for_category(category: str) -> list[Path]:
-    """
-    RCA evidence can cross application layers. Always make both backend and
-    frontend source available to the repair agent, while putting the reported
-    layer first.
-    """
-    backend = APP_ROOT / "backend"
-    frontend = APP_ROOT / "frontend" / "src"
-
-    if category == "frontend":
-        roots = [frontend, backend]
-    elif category == "backend":
-        roots = [backend, frontend]
-    else:
-        roots = [backend, frontend]
-
-    for candidate in (
-        APP_ROOT / "frontend" / "package.json",
-        APP_ROOT / "frontend" / "angular.json",
-        APP_ROOT / "Dockerfile",
-        APP_ROOT / "app.py",
-    ):
-        if candidate.exists():
-            roots.append(candidate)
-
-    return roots
 
 
 def iter_source_files(category: str) -> list[Path]:
+    """Every text file of the application and its infrastructure, minus secrets."""
     files: list[Path] = []
-    seen: set[Path] = set()
 
-    ignored_parts = {
-        "node_modules",
-        ".git",
-        ".venv",
-        "__pycache__",
-        "dist",
-        "coverage",
-        "build",
-    }
-
-    for root in source_roots_for_category(category):
-        if not root.exists():
+    for path in sorted(APP_ROOT.rglob("*")):
+        if not path.is_file():
             continue
 
-        if root.is_file():
-            candidates = [root]
-        else:
-            candidates = root.rglob("*")
+        if IGNORED_PARTS.intersection(path.relative_to(APP_ROOT).parts):
+            continue
 
-        for path in candidates:
-            if not path.is_file():
-                continue
+        if path.name in SKIPPED_FILES or is_secret_file(path):
+            continue
 
-            if path.suffix.lower() not in TEXT_SUFFIXES:
-                continue
+        if (
+            path.suffix.lower() not in TEXT_SUFFIXES
+            and path.name.lower() not in TEXT_FILENAMES
+        ):
+            continue
 
-            if any(part in ignored_parts for part in path.parts):
-                continue
-
-            resolved = path.resolve()
-
-            if resolved not in seen:
-                seen.add(resolved)
-                files.append(resolved)
+        files.append(path.resolve())
 
     return files
 
@@ -500,18 +468,21 @@ def validate_relative_path(raw_path: Any) -> Path:
         absolute.relative_to(APP_ROOT.resolve())
     except ValueError as exc:
         raise RuntimeError(
-            f"Change must target APP_EKS: {raw_path}"
+            f"Change must target {APP_ROOT.name}: {raw_path}"
         ) from exc
 
+    if is_secret_file(absolute):
+        raise RuntimeError(
+            f"Secrets and .env files must not be edited by the agent: {raw_path}"
+        )
+
+    if is_test_file(relative):
+        raise RuntimeError(
+            f"Tests must not be edited to make a fix pass: {raw_path}"
+        )
+
     if any(
-        part.lower() in {
-            "node_modules",
-            ".git",
-            ".venv",
-            "__pycache__",
-            "build",
-            "dist",
-        }
+        part.lower() in IGNORED_PARTS
         for part in relative.parts
     ):
         raise RuntimeError(
@@ -696,67 +667,212 @@ def run_command(
 
 
 
+def check_result(
+    name: str,
+    problems: list[str],
+) -> dict[str, Any]:
+    return {
+        "command": name,
+        "returncode": 1 if problems else 0,
+        "status": "failed" if problems else "passed",
+        "duration_seconds": 0,
+        "stdout": "\n".join(problems) or "OK",
+        "stderr": "",
+    }
+
+
+def check_dockerfile(path: Path) -> list[str]:
+    problems: list[str] = []
+    context = path.parent
+
+    instructions = [
+        line.strip()
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.strip().startswith("#")
+    ]
+
+    if not instructions or not instructions[0].upper().startswith(("FROM", "ARG")):
+        problems.append("Dockerfile must start with FROM (or ARG).")
+
+    for line in instructions:
+        keyword, _, rest = line.partition(" ")
+
+        if keyword.upper() not in {"COPY", "ADD"}:
+            continue
+
+        if "--from=" in rest:
+            continue
+
+        parts = [p for p in rest.split() if not p.startswith("--")]
+        sources = parts[:-1]
+
+        if parts and parts[0].startswith("["):
+            try:
+                sources = json.loads(rest)[:-1]
+            except json.JSONDecodeError:
+                continue
+
+        for source in sources:
+            if "$" in source or source.startswith(("http://", "https://")):
+                continue
+
+            if not glob.glob(str(context / source)):
+                problems.append(
+                    f"{keyword} source '{source}' does not exist in build "
+                    f"context {context.relative_to(ROOT).as_posix()}"
+                )
+
+    return problems
+
+
+def parse_memory(value: Any) -> int | None:
+    match = re.fullmatch(r"(\d+)(Ki|Mi|Gi)?", str(value))
+
+    if not match:
+        return None
+
+    unit = {None: 1, "Ki": 1024, "Mi": 1024**2, "Gi": 1024**3}[match.group(2)]
+    return int(match.group(1)) * unit
+
+
+def check_kubernetes_document(doc: dict[str, Any]) -> list[str]:
+    problems: list[str] = []
+    kind = doc.get("kind")
+
+    if not doc.get("apiVersion") or not kind:
+        return ["Document is missing apiVersion or kind."]
+
+    if kind != "Deployment":
+        return problems
+
+    spec = doc.get("spec", {})
+    template = spec.get("template", {})
+    selector = spec.get("selector", {}).get("matchLabels", {})
+    labels = template.get("metadata", {}).get("labels", {})
+
+    if not selector or any(labels.get(k) != v for k, v in selector.items()):
+        problems.append("Deployment selector does not match pod template labels.")
+
+    for container in template.get("spec", {}).get("containers", []):
+        name = container.get("name", "?")
+
+        if not container.get("image"):
+            problems.append(f"Container {name} has no image.")
+
+        resources = container.get("resources", {})
+        requested = parse_memory(resources.get("requests", {}).get("memory"))
+        limit = parse_memory(resources.get("limits", {}).get("memory"))
+
+        if requested and limit and requested > limit:
+            problems.append(f"Container {name} memory request exceeds its limit.")
+
+    return problems
+
+
+def check_yaml(path: Path) -> list[str]:
+    try:
+        import yaml
+    except ImportError:
+        return ["PyYAML is not installed; cannot validate YAML."]
+
+    try:
+        documents = [
+            doc
+            for doc in yaml.safe_load_all(path.read_text(encoding="utf-8"))
+            if doc is not None
+        ]
+    except yaml.YAMLError as exc:
+        return [f"Invalid YAML: {exc}"]
+
+    problems: list[str] = []
+
+    if "k8s" in path.parts:
+        for doc in documents:
+            problems.extend(check_kubernetes_document(doc))
+
+    return problems
+
+
+def check_requirements(path: Path) -> list[str]:
+    pattern = re.compile(r"^[A-Za-z0-9_.\-]+(\[[A-Za-z0-9_,\-]+\])?\s*([=<>!~]=?.+)?$")
+
+    return [
+        f"Unparseable requirement: {line}"
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+        and not line.strip().startswith(("#", "-"))
+        and not pattern.match(line.strip())
+    ]
+
+
+def run_tests() -> tuple[dict[str, Any] | None, set[str]]:
+    """Run the app's pytest suite; returns the raw result and the passing test ids."""
+    if not (APP_ROOT / "tests").exists():
+        return None, set()
+
+    result = run_command(
+        [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "-rA", "tests"],
+        APP_ROOT,
+        timeout=300,
+    )
+
+    if "No module named pytest" in result["stdout"] + result["stderr"]:
+        result["status"] = "skipped"
+        return result, set()
+
+    passed = {
+        line.split()[1]
+        for line in result["stdout"].splitlines()
+        if line.startswith("PASSED ")
+    }
+
+    return result, passed
+
+
 def run_verification(
     applied: list[dict[str, str]],
+    baseline_passed: set[str],
 ) -> list[dict[str, Any]]:
     results: list[dict[str, Any]] = []
 
-    changed_paths = [item["path"].lower() for item in applied]
+    changed = [ROOT / item["path"] for item in applied]
 
-    backend_changed = any(
-        p == "app_eks/app.py"
-        or p.startswith("app_eks/backend/")
-        for p in changed_paths
-    )
+    for path in changed:
+        relative = path.relative_to(ROOT).as_posix()
+        name = path.name.lower()
 
-    frontend_changed = any(
-        p.startswith("app_eks/frontend/")
-        for p in changed_paths
-    )
+        if path.suffix == ".py":
+            results.append(
+                run_command([sys.executable, "-m", "py_compile", str(path)], ROOT)
+            )
+        elif name == "dockerfile":
+            results.append(check_result(f"dockerfile check {relative}", check_dockerfile(path)))
+        elif path.suffix in {".yaml", ".yml"}:
+            results.append(check_result(f"yaml check {relative}", check_yaml(path)))
+        elif name.startswith("requirements") and path.suffix == ".txt":
+            results.append(check_result(f"requirements check {relative}", check_requirements(path)))
 
-    python_exe = ROOT / ".venv" / "Scripts" / "python.exe"
+    if any(p.suffix == ".py" for p in changed):
+        test_result, passed = run_tests()
 
-    if backend_changed and python_exe.exists():
-        backend_targets = []
+        if test_result is not None:
+            regressions = sorted(baseline_passed - passed)
+            fixed = sorted(passed - baseline_passed)
 
-        root_app = APP_ROOT / "app.py"
-        backend_dir = APP_ROOT / "backend"
+            if test_result["status"] != "skipped":
+                test_result["status"] = "failed" if regressions else "passed"
+                test_result["returncode"] = 1 if regressions else 0
 
-        if root_app.exists():
-            backend_targets.append(root_app)
-
-        if backend_dir.exists():
-            backend_targets.append(backend_dir)
-
-        if backend_targets:
-            for target in backend_targets:
-                results.append(
-                    run_command(
-                        [
-                            str(python_exe),
-                            "-m",
-                            "py_compile",
-                            str(target),
-                        ],
-                        ROOT,
-                    )
-                    if target.is_file()
-                    else run_command(
-                        [
-                            str(python_exe),
-                            "-m",
-                            "compileall",
-                            "-q",
-                            str(target),
-                        ],
-                        ROOT,
-                    )
-                )
+            test_result["stdout"] = (
+                f"Regressions: {regressions or 'none'}\n"
+                f"Newly passing: {fixed or 'none'}\n\n" + test_result["stdout"]
+            )
+            results.append(test_result)
 
     frontend_dir = APP_ROOT / "frontend"
     package_json = frontend_dir / "package.json"
 
-    if frontend_changed and package_json.exists():
+    if any(frontend_dir in p.parents for p in changed) and package_json.exists():
         try:
             package = json.loads(
                 package_json.read_text(encoding="utf-8")
@@ -777,26 +893,14 @@ def run_verification(
                         timeout=300,
                     )
                 )
-            else:
-                results.append(
-                    {
-                        "command": "npm run build",
-                        "returncode": None,
-                        "status": "skipped",
-                        "duration_seconds": 0,
-                        "stdout": "",
-                        "stderr": "npm/npm.cmd was not found on PATH.",
-                    }
-                )
 
     return results
 
 
 def verification_passed(results: list[dict[str, Any]]) -> bool:
-    if not results:
-        return False
+    statuses = [result.get("status") for result in results]
 
-    return bool(results) and all(result.get("status") == "passed" for result in results)
+    return "passed" in statuses and "failed" not in statuses
 
 
 # ---------------------------------------------------------------------------
@@ -813,11 +917,13 @@ def build_prompt(
     source_index = "\n".join(f"- {p}" for p in source_files)
 
     return f"""
-You are the code-repair engineer for an application.
+You are a senior site reliability engineer who also owns the code. You repair
+incidents in a multi-service application (API, worker, Dockerfiles, Kubernetes
+manifests, configuration).
 
-You must investigate the supplied RCA report against the CURRENT source code.
+You must investigate the supplied RCA report against the CURRENT repository.
 Do not assume the RCA is correct merely because it says "high confidence".
-The current source code is authoritative for what exists now.
+The current repository is authoritative for what exists now.
 
 Application root:
 {APP_ROOT}
@@ -825,7 +931,7 @@ Application root:
 RCA report:
 {report_path.relative_to(ROOT).as_posix()}
 
-Application category:
+Incident category:
 {category}
 
 SOURCE FILE INDEX:
@@ -840,52 +946,60 @@ RCA REPORT CONTENT:
 Your task:
 
 1. Determine whether the reported problem is still reproducible from the
-   current source code and the evidence in the RCA.
-2. Compare the RCA claims with the actual source.
-3. Explicitly identify discrepancies, stale-code possibilities, or missing
-   evidence.
+   current repository and the evidence in the RCA.
+2. Compare the RCA claims with the actual files.
+3. Explicitly identify discrepancies, stale-deployment possibilities, or
+   missing evidence.
 4. Decide one of:
-   - "fix" when a justified source change is supported by evidence.
-   - "no_fix" when current code already handles the reported condition or the
-     RCA does not require a source change.
+   - "fix" when a justified repository change is supported by evidence.
+   - "no_fix" when the current repository already handles the reported
+     condition or the RCA does not require a repository change (for example
+     an external outage, or a stale deployment of already-fixed code).
    - "needs_human_review" when evidence is insufficient, contradictory, risky,
      or the required change cannot be justified safely.
 5. For "fix", propose the smallest justified change.
-6. Never invent files, functions, APIs, tests, or evidence.
-7. Never modify generated files, node_modules, build output, .git, or .venv.
-8. Do not propose deployment commands.
+6. Never invent files, functions, APIs, tests, values, or evidence.
+7. Never modify generated files, node_modules, build output, .git, .venv,
+   tests, secrets, or .env files.
+8. Do not propose deployment commands; deployment steps are derived
+   separately.
 9. Do not blindly map an error message to a predefined fix.
 10. Prefer backward-compatible and minimal changes.
 11. A change must use exact old_text copied from the supplied current source.
 12. old_text must identify exactly one occurrence in the file.
 13. A "fix" must directly mitigate the observed failure in the RCA. Do not
-    convert preventive recommendations into an immediate code fix.
-14. Do not make unrelated changes to analytics, formatting, tooling,
-    configuration, dependencies, or project metadata.
-15. Do not modify angular.json, package.json, Dockerfile, or other project
-    configuration unless the RCA evidence specifically identifies that
-    configuration as part of the failure.
-16. When the RCA says a frontend exception occurred but the current frontend
-    source already handles the reported condition, do NOT invent a backend
-    enhancement as a substitute. Choose "no_fix" or "needs_human_review".
-17. When evidence crosses backend and frontend layers, inspect both before
-    deciding.
-18. The proposed change must name the exact current function, handler, route,
-    or code path it fixes and explain the causal connection to the RCA.
-19. Prefer one minimal source change. Multiple files require explicit causal
+    convert preventive recommendations into an immediate change.
+14. Do not make unrelated changes to formatting, tooling, dependencies, or
+    project metadata.
+15. Infrastructure files (Dockerfile, Kubernetes manifests, docker-compose,
+    configuration) may be changed only when the RCA evidence identifies them
+    as part of the failure, and the corrected value must be derivable from
+    the repository itself (for example a Service name, a port, a file path).
+    If the right value cannot be derived, choose "needs_human_review".
+16. Fix the underlying defect, not just the trigger. A resource limit should
+    not be raised to hide a leak; a failing dependency should be handled with
+    timeouts, retries or graceful degradation rather than ignored; a crash on
+    a recoverable error should recover. Do not weaken health checks, remove
+    error handling, or silence logging to make symptoms disappear.
+17. When evidence crosses components, inspect all of them before deciding.
+18. The proposed change must name the exact function, route, manifest key or
+    instruction it fixes and explain the causal connection to the RCA.
+19. Prefer one minimal change. Multiple files require explicit causal
     justification.
+20. Never place credentials or secrets in any file.
 
 Return ONLY valid JSON using this exact structure:
 
 {{
   "decision": "fix|no_fix|needs_human_review",
   "confidence": "high|medium|low",
+  "fix_target": "application_code|dockerfile|kubernetes_manifest|configuration|none",
   "root_cause_assessment": "string",
   "discrepancies": ["string"],
   "reasoning": "string",
   "changes": [
     {{
-      "path": "APP_EKS/...",
+      "path": "{APP_ROOT.name}/...",
       "old_text": "exact existing text",
       "new_text": "replacement text",
       "why": "specific justification"
@@ -901,6 +1015,34 @@ For "no_fix" or "needs_human_review", changes must be [].
 # ---------------------------------------------------------------------------
 # Report writing
 # ---------------------------------------------------------------------------
+
+def deployment_steps(applied: list[dict[str, str]]) -> list[str]:
+    """Derived from the files actually changed; the agent never deploys."""
+    steps: list[str] = []
+
+    for item in applied:
+        relative = Path(item["path"]).relative_to(APP_ROOT.name)
+        area = relative.parts[0]
+
+        if area in {"api", "worker"}:
+            step = (
+                f"Rebuild and push the orders-{area} image, then "
+                f"`kubectl rollout restart deployment/orders-{area}`."
+            )
+        elif area == "k8s":
+            step = f"`kubectl apply -f {item['path']}`."
+        elif relative.name.startswith("docker-compose"):
+            step = "`docker compose up -d --build`."
+        elif area == "frontend":
+            step = "Rebuild the frontend bundle into the image build context and redeploy."
+        else:
+            continue
+
+        if step not in steps:
+            steps.append(step)
+
+    return steps
+
 
 def write_fix_report(
     report_path: Path,
@@ -928,6 +1070,8 @@ def write_fix_report(
         f"**RCA report:** "
         f"{report_path.relative_to(ROOT).as_posix()}",
         f"**Decision:** {plan.get('decision')}",
+        f"**Outcome:** {plan.get('outcome', 'no_change')}",
+        f"**Fix target:** {plan.get('fix_target', 'unspecified')}",
         f"**Confidence:** {plan.get('confidence')}",
         "",
         "## Root Cause Assessment",
@@ -966,6 +1110,12 @@ def write_fix_report(
     else:
         lines.append("- No source changes were applied.")
 
+    steps = deployment_steps(applied)
+
+    if steps:
+        lines.extend(["", "## Deployment Steps Required", ""])
+        lines.extend(f"- {step}" for step in steps)
+
     lines.extend(
         [
             "",
@@ -976,11 +1126,10 @@ def write_fix_report(
 
     if verification:
         for result in verification:
-            status = (
-                "PASS"
-                if result["returncode"] == 0
-                else "FAIL"
-            )
+            status = {
+                "passed": "PASS",
+                "skipped": "SKIPPED",
+            }.get(result["status"], "FAIL")
 
             lines.extend(
                 [
@@ -1096,34 +1245,45 @@ def process_report(report_path: Path) -> None:
 
         log(f"Applying {len(changes)} validated change(s)...")
 
-        applied = apply_changes(
-            changes,
-            backup_dir,
-        )
+        _, baseline_passed = run_tests()
 
-        log("Source changes applied locally.")
-
-        verification = run_verification(applied)
-
-        if not verification_passed(verification):
-            log(
-                "Verification failed. Restoring backed-up source files."
-            )
-
-            rollback_changes(
-                applied,
+        try:
+            applied = apply_changes(
+                changes,
                 backup_dir,
             )
-
+        except RuntimeError as exc:
+            log(f"Proposed change rejected: {exc}")
+            plan["outcome"] = "rejected"
             plan["verification_notes"] = (
                 str(plan.get("verification_notes", ""))
-                + "\nAutomatic verification failed; changes were rolled back."
+                + f"\nProposed change was rejected: {exc}"
             )
-
-            applied = []
-
         else:
-            log("Verification passed.")
+            log("Source changes applied locally.")
+
+            verification = run_verification(applied, baseline_passed)
+
+            if verification_passed(verification):
+                log("Verification passed.")
+                plan["outcome"] = "applied"
+            else:
+                log(
+                    "Verification failed. Restoring backed-up source files."
+                )
+
+                rollback_changes(
+                    applied,
+                    backup_dir,
+                )
+
+                plan["verification_notes"] = (
+                    str(plan.get("verification_notes", ""))
+                    + "\nAutomatic verification failed; changes were rolled back."
+                )
+                plan["outcome"] = "rolled_back"
+
+                applied = []
 
     elif decision == "no_fix":
         log(
@@ -1188,6 +1348,27 @@ def initialize_watch_state(process_existing: bool) -> None:
 # Main
 # ---------------------------------------------------------------------------
 
+def acquire_watcher_lock():
+    """Two watchers would process the same RCA report twice and stack duplicate edits."""
+    lock_file = open(FIX_ROOT / ".watcher.lock", "w")
+
+    try:
+        if os.name == "nt":
+            import msvcrt
+
+            msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        raise RuntimeError(
+            "Another Fix Agent watcher is already running."
+        ) from None
+
+    return lock_file
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Autonomous RCA follow-up code repair agent"
@@ -1240,6 +1421,8 @@ def main() -> None:
 
         process_report(report)
         return
+
+    watcher_lock = acquire_watcher_lock()  # held until process exit
 
     initialize_watch_state(args.process_existing)
 

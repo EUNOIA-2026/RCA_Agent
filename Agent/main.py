@@ -1,6 +1,8 @@
 import json
 import os
 import queue
+import re
+import subprocess
 import threading
 import time
 from datetime import datetime, timezone
@@ -40,12 +42,34 @@ CLOUDWATCH_LOG_GROUP = os.getenv(
     "CLOUDWATCH_LOG_GROUP",
     "/aws/containerinsights/Eunoia/application",
 )
+# Comma-separated substrings; a stream/pod is watched if its name contains any.
 CLOUDWATCH_STREAM_MATCH = os.getenv(
     "CLOUDWATCH_STREAM_MATCH",
-    "simple-python-app",
+    "orders-,simple-python-app",
 )
 ERROR_LOOKBACK_SECONDS = float(os.getenv("ERROR_LOOKBACK_SECONDS", "2"))
 ERROR_LOOKAHEAD_SECONDS = float(os.getenv("ERROR_LOOKAHEAD_SECONDS", "5"))
+
+K8S_WATCH_ENABLED = os.getenv("K8S_WATCH_ENABLED", "true").lower() == "true"
+K8S_NAMESPACE = os.getenv("K8S_NAMESPACE", "default")
+K8S_POLL_INTERVAL = float(os.getenv("K8S_POLL_INTERVAL", "15"))
+
+# Drop *.log files here (e.g. docker build / CI output) to raise an incident.
+INCOMING_DIR = Path(
+    os.getenv("INCOMING_LOG_DIR", str(Path(__file__).resolve().parent / "incoming"))
+)
+
+# Repeats of the same incident inside this window do not trigger another RCA.
+DEDUPE_SECONDS = float(os.getenv("DEDUPE_SECONDS", "300"))
+
+APP_SOURCE_DIR = Path(
+    os.getenv(
+        "APP_SOURCE_DIR",
+        str(Path(__file__).resolve().parent.parent / "Orders_Platform"),
+    )
+)
+
+MATCHES = [m.strip() for m in CLOUDWATCH_STREAM_MATCH.split(",") if m.strip()]
 
 URL = (
     f"{PROJECT_ENDPOINT}/agents/{AGENT_NAME}"
@@ -105,7 +129,23 @@ def describe_cloudwatch_event(stream_name: str, event: dict[str, Any]) -> str:
 
 
 def classify(log_text: str) -> str:
-    text = log_text.upper()
+    first_line = log_text.strip().splitlines()[0] if log_text.strip() else ""
+    text = first_line.upper()
+
+    if "K8S_POD_STATUS" in text or "K8S_EVENT" in text:
+        if "REASON=OOMKILLED" in text:
+            return "resource"
+        if "REASON=CREATECONTAINERCONFIGERROR" in text:
+            return "config"
+        return "infrastructure"
+    if "CONFIG_ERROR" in text:
+        return "config"
+    if "DEPENDENCY_ERROR" in text:
+        return "dependency"
+    if "RESOURCE_ERROR" in text:
+        return "resource"
+    if "BUILD_ERROR" in text or "FAILED TO SOLVE" in text:
+        return "build"
     if "FRONTEND_ERROR" in text:
         return "frontend"
     if "DATABASE_ERROR" in text:
@@ -147,10 +187,26 @@ def iter_sse(response: requests.Response):
                 continue
 
 
+def repo_file_index() -> str:
+    if not APP_SOURCE_DIR.exists():
+        return "(repository not available)"
+
+    skip = {"__pycache__", ".git", ".venv", "node_modules"}
+    files = sorted(
+        p.relative_to(APP_SOURCE_DIR).as_posix()
+        for p in APP_SOURCE_DIR.rglob("*")
+        if p.is_file() and not skip.intersection(p.parts)
+    )
+    return "\n".join(files[:200])
+
+
 def invoke_agent(log_text: str, category: str) -> str:
-    prompt = f"""Perform root cause analysis for the following production incident.
+    prompt = f"""Perform root cause analysis for the following production incident as a
+senior site reliability engineer.
 
 Application layer: {category}
+(categories: frontend, backend, database, config, dependency, resource,
+infrastructure, build)
 
 Analyze the logs and provide:
 1. Incident summary
@@ -159,13 +215,21 @@ Analyze the logs and provide:
 4. Error/exception analysis
 5. Root cause
 6. Evidence from the logs
-7. Impact
+7. Impact (blast radius, user-facing symptoms)
 8. Immediate remediation
 9. Preventive actions
 10. Confidence level
+11. Fix target: the repository file(s), chosen from the file list below, that
+    need to change, and their type (application code, Dockerfile, Kubernetes
+    manifest, or configuration). If no repository change is appropriate
+    (for example an external outage), say so.
 
 Do not invent missing evidence. If a stack trace is available, use the exception type,
-file and line number when present.
+file and line number when present. Distinguish the trigger from the underlying
+defect, and prefer the durable fix over a workaround.
+
+REPOSITORY FILES:
+{repo_file_index()}
 
 LOGS:
 {log_text}"""
@@ -265,7 +329,7 @@ class CloudWatchWatcher:
         ):
             for item in page.get("logStreams", []):
                 name = item.get("logStreamName", "")
-                if CLOUDWATCH_STREAM_MATCH in name:
+                if any(match in name for match in MATCHES):
                     names.append(name)
         return names
 
@@ -309,15 +373,177 @@ class CloudWatchWatcher:
         return detections
 
 
+BAD_WAITING_REASONS = {
+    "CrashLoopBackOff",
+    "ImagePullBackOff",
+    "ErrImagePull",
+    "CreateContainerConfigError",
+    "CreateContainerError",
+    "InvalidImageName",
+}
+
+
+class K8sWatcher:
+    """Surfaces failures that never reach application logs (OOMKilled, probes, image pulls)."""
+
+    def __init__(self) -> None:
+        self.seen: set[str] = set()
+        self.primed = PROCESS_EXISTING
+        self.last_poll = 0.0
+
+    def _kubectl(self, *args: str) -> str:
+        result = subprocess.run(
+            ["kubectl", "-n", K8S_NAMESPACE, *args],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=True,
+        )
+        return result.stdout
+
+    def _previous_logs(self, pod: str, container: str) -> str:
+        try:
+            return self._kubectl("logs", pod, "-c", container, "--previous", "--tail=30")
+        except Exception:
+            return ""
+
+    def poll(self) -> list[tuple[str, int, str, str]]:
+        if time.monotonic() - self.last_poll < K8S_POLL_INTERVAL:
+            return []
+        self.last_poll = time.monotonic()
+
+        now_ms = int(time.time() * 1000)
+        detections = []
+
+        pods = json.loads(self._kubectl("get", "pods", "-o", "json")).get("items", [])
+        for pod in pods:
+            name = pod["metadata"]["name"]
+            if not any(match in name for match in MATCHES):
+                continue
+
+            for status in pod.get("status", {}).get("containerStatuses", []):
+                waiting = status.get("state", {}).get("waiting") or {}
+                last = status.get("lastState", {}).get("terminated") or {}
+                restarts = status.get("restartCount", 0)
+
+                reason = None
+                if last.get("reason") == "OOMKilled":
+                    reason = "OOMKilled"
+                elif waiting.get("reason") in BAD_WAITING_REASONS:
+                    reason = waiting["reason"]
+                if not reason:
+                    continue
+
+                key = f"{name}/{status['name']}/{reason}/{restarts}"
+                if key in self.seen:
+                    continue
+                self.seen.add(key)
+
+                line = (
+                    f"ERROR K8S_POD_STATUS pod={name} container={status['name']} "
+                    f"reason={reason} restarts={restarts} "
+                    f"last_exit_code={last.get('exitCode')} "
+                    f"last_reason={last.get('reason')} "
+                    f"message={waiting.get('message', '')}"
+                )
+                previous = (
+                    self._previous_logs(name, status["name"]) if self.primed else ""
+                )
+                if previous:
+                    line += f"\nPrevious container logs:\n{previous}"
+                detections.append((f"k8s:{name}", now_ms, key, line))
+
+        events = json.loads(
+            self._kubectl("get", "events", "--field-selector", "type=Warning", "-o", "json")
+        ).get("items", [])
+        for event in events:
+            obj = event.get("involvedObject", {})
+            if not any(match in obj.get("name", "") for match in MATCHES):
+                continue
+            if event.get("reason") == "BackOff":
+                continue  # already reported through pod status
+
+            key = f"{event['metadata']['uid']}/{event.get('count', 1)}"
+            if key in self.seen:
+                continue
+            self.seen.add(key)
+
+            line = (
+                f"ERROR K8S_EVENT object={obj.get('kind')}/{obj.get('name')} "
+                f"reason={event.get('reason')} count={event.get('count', 1)} "
+                f"message={event.get('message', '')}"
+            )
+            detections.append((f"k8s:{obj.get('name')}", now_ms, key, line))
+
+        if not self.primed:
+            self.primed = True
+            return []
+
+        return detections
+
+
+class IncomingLogWatcher:
+    """Raises an incident for each new *.log file (build/CI output) in INCOMING_DIR."""
+
+    def __init__(self) -> None:
+        INCOMING_DIR.mkdir(parents=True, exist_ok=True)
+        self.seen: set[str] = set()
+
+        if not PROCESS_EXISTING:
+            self.seen = {str(p) for p in INCOMING_DIR.glob("*.log")}
+
+    def poll(self) -> list[tuple[str, int, str, str]]:
+        detections = []
+
+        for path in sorted(INCOMING_DIR.glob("*.log")):
+            if str(path) in self.seen:
+                continue
+            self.seen.add(str(path))
+
+            text = path.read_text(encoding="utf-8", errors="replace")[-8000:].strip()
+            if not text:
+                continue
+
+            if "BUILD_ERROR" not in text.upper():
+                text = f"BUILD_ERROR {path.name}\n{text}"
+            detections.append((f"file:{path.name}", int(time.time() * 1000), path.name, text))
+
+        return detections
+
+
+VOLATILE_TOKENS = re.compile(r"[0-9a-f]{6,}|\d+")
+recent_incidents: dict[str, float] = {}
+
+
+def is_duplicate(category: str, error_line: str) -> bool:
+    first_line = error_line.strip().splitlines()[0]
+    normalized = VOLATILE_TOKENS.sub("#", first_line)[-160:]
+    signature = f"{category}:{normalized}"
+    now = time.monotonic()
+
+    last = recent_incidents.get(signature)
+    recent_incidents[signature] = now
+    return last is not None and now - last < DEDUPE_SECONDS
+
+
 def worker(q: queue.Queue) -> None:
     while True:
         stream_name, timestamp, event_id, error_line = q.get()
         try:
-            # Give CloudWatch a moment to ingest traceback/access-log lines that follow the ERROR.
-            time.sleep(1.0)
-            context = fetch_context(watcher.client, stream_name, timestamp)
             category = classify(error_line)
-            all_logs = "\n".join(context) if context else error_line
+
+            if is_duplicate(category, error_line):
+                log(f"Skipping repeat of a recent {category} incident (eventId={event_id})")
+                continue
+
+            if stream_name.startswith(("k8s:", "file:")):
+                all_logs = error_line
+            else:
+                # Give CloudWatch a moment to ingest traceback/access-log lines that follow the ERROR.
+                time.sleep(1.0)
+                context = fetch_context(watcher.client, stream_name, timestamp)
+                all_logs = "\n".join(context) if context else error_line
+
             analysis = invoke_agent(all_logs, category)
             report_path = write_report(category, all_logs, analysis)
             log(f"RCA report created: {report_path} (eventId={event_id})")
@@ -330,28 +556,30 @@ def worker(q: queue.Queue) -> None:
 def main() -> None:
     global watcher
     watcher = CloudWatchWatcher()
+    sources = [("CloudWatch", watcher), ("build logs", IncomingLogWatcher())]
+    if K8S_WATCH_ENABLED:
+        sources.append(("Kubernetes", K8sWatcher()))
+
     work: queue.Queue = queue.Queue()
     threading.Thread(target=worker, args=(work,), daemon=True).start()
 
     log(
         f"Watching CloudWatch '{CLOUDWATCH_LOG_GROUP}' for streams containing "
-        f"'{CLOUDWATCH_STREAM_MATCH}' every {POLL_INTERVAL:.1f}s"
+        f"{MATCHES} every {POLL_INTERVAL:.1f}s"
     )
-    log(f"Reports: {REPORT_DIR / 'frontend'}, {REPORT_DIR / 'backend'}, {REPORT_DIR / 'database'}")
+    log(f"Also watching: {', '.join(name for name, _ in sources[1:])} ({INCOMING_DIR})")
+    log(f"Reports: {REPORT_DIR}/<category>")
 
     while True:
-        try:
-            detections = watcher.poll()
-            for stream_name, timestamp, event_id, error_line in detections:
-                log(
-                    f"AUTO-DETECT: {error_line} "
-                    f"(stream={stream_name.split(':')[-1][:80]} eventId={event_id})"
-                )
-                work.put((stream_name, timestamp, event_id, error_line))
-        except Exception as exc:
-            log(f"CloudWatch watcher error: {exc!r}")
-        time.sleep(POLL_INTERVAL)
-
-
+        for source_name, source in sources:
+            try:
+                for stream_name, timestamp, event_id, error_line in source.poll():
+                    log(
+                        f"AUTO-DETECT[{source_name}]: {error_line.splitlines()[0]} "
+                        f"(stream={stream_name.split(':')[-1][:80]} eventId={event_id})"
+                    )
+                    work.put((stream_name, timestamp, event_id, error_line))
+            except Exception as exc:
+                log(f"{source_name} watcher error: {exc!r}")
 if __name__ == "__main__":
     main()
