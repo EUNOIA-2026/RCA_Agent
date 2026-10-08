@@ -88,7 +88,7 @@ def add_student():
 
         if grade not in {"A", "A+", "C", "D", "F"}:
             return jsonify({
-                "error": "Grade must be A, B, C, D or F"
+                "error": "Grade must be A, A+, C, D or F"
             }), 400
 
         students = read_students()
