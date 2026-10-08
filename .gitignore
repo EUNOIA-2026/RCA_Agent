@@ -3,5 +3,4 @@
 .idea/
 __pycache__/
 *.pyc
-reports/
 logs/
