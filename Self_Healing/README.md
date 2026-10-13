@@ -1,70 +1,61 @@
-# Self-Healing Documentation Agent
+# Jira Code Change Intelligence
 
-The agent supports two modes:
+This tool compares a Jira ticket with a developer's completed code changes,
+asks the configured Azure AI Agent to trace the supported technical and
+functional impact, and writes a Markdown analysis report.
 
-- **Plan mode** calls the configured Azure AI agent once and prints its response.
-- **Watch mode** monitors source/configuration files in the `RCA_Agent` repository.
-  When it detects a change, it sends the relevant source context and existing
-  documentation to the agent, validates its proposed patch, and updates only
-  the relevant sections of existing documentation. It can also process merged
-  GitHub pull requests.
-
-The watcher uses the repository's existing documentation, including
-`APP_EKS/docs/technical-documentation.md` and
-`APP_EKS/docs/functional-documentation.md`. The agent chooses which existing
-document is relevant to each change. It does not create or replace documents.
+The agent must be configured to use GPT-5 in Azure AI Foundry. The CLI calls
+that agent through its Responses endpoint; it does not select or override the
+model itself.
 
 ## Setup
 
-Create `Self_Healing\.env` with the Azure AI settings:
+1. Copy `.env.example` to `.env` in this directory and set the Azure AI project
+   endpoint, agent name, and API key. Keep `.env` private.
+2. Install dependencies:
 
-```dotenv
-AZURE_AI_PROJECT_ENDPOINT=https://your-project-endpoint
-AGENT_NAME_2=your-agent-name
-API_KEY=your-api-key
-API_VERSION=v1
-```
+   ```powershell
+   python -m pip install -r Self_Healing/requirements.txt
+   ```
 
-`API_VERSION` is optional and defaults to `v1`; `AGENT_NAME` can be used
-instead of `AGENT_NAME_2`. Keep credentials out of source control.
+## Analyze a developer change
 
-Automatic documentation pull requests also require a GitHub remote (or
-`GITHUB_REPOSITORY=owner/repo`) and a `GITHUB_TOKEN` or `GH_TOKEN` with
-permission to read the repository and push a branch. The watcher will not
-apply documentation patches if the GitHub pull-request preflight fails.
-
-Install the dependencies from the repository root:
+From the workspace root, provide the Jira Markdown file and repository path.
+The default comparison is the worktree against `HEAD`:
 
 ```powershell
-python -m pip install -r RCA_Agent\Self_Healing\requirements.txt
+python Self_Healing/self_healing.py analyze `
+  --ticket APP_EKS/tests/jira/STU-104.md `
+  --repo APP_EKS
 ```
 
-## Run
-
-From the repository root, check the one-shot plan mode:
+To compare committed work against a base branch, name it explicitly:
 
 ```powershell
-python RCA_Agent\Self_Healing\fixmain.py
+python Self_Healing/self_healing.py analyze `
+  --ticket APP_EKS/tests/jira/STU-104.md `
+  --repo APP_EKS `
+  --base-ref origin/main
 ```
 
-Ask the agent to explain a particular request:
+Alternatively, supply a unified diff with `--diff PATH`; this is useful when
+the change is not available as a local Git worktree. Use `--output-dir PATH` to
+choose another report directory. By default reports go to
+`Self_Healing/reports/`.
 
-```powershell
-python RCA_Agent\Self_Healing\fixmain.py "Review the login flow and explain your proposed steps"
-```
+The ticket key is read from the ticket content or filename. A functional
+classification creates `functional_<ticket-key>.md`; a technical
+classification creates `technical_<ticket-key>.md`. BOTH creates both files,
+each containing the complete combined analysis.
 
-Start the documentation watcher:
+## Analysis boundaries
 
-```powershell
-python RCA_Agent\Self_Healing\fixmain.py --watch
-```
+Only application source files are included as code context. Configuration,
+build outputs, dependencies, and likely credential/security files are excluded;
+credential-like literals in eligible source or diffs are redacted before the
+Azure request. The agent is instructed not to perform security analysis. The
+tool does not modify application files or the Jira ticket.
 
-The watcher polls every 5 seconds by default. Set
-`FIX_AGENT_WATCH_INTERVAL` to change that interval. It records a baseline on
-first startup and handles subsequent changes. Transient Azure or processing
-errors are reported and retried with backoff rather than stopping the watcher.
-Stop it with Ctrl+C. The watcher keeps one latest combined report per change
-type, overwriting the previous report of that type:
-
-- Functional changes: `RCA_Agent\Self_Healing\reports\functional_changes\latest.md`
-- Technical changes: `RCA_Agent\Self_Healing\reports\technical\latest.md`
+The generated report distinguishes confirmed, inferred, and unknown impact.
+It is an evidence-based review, not proof that tests passed or that a behavior
+was measured. Review the report and run the recommended application tests.
